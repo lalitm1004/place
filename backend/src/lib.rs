@@ -1,5 +1,11 @@
 mod canvas;
-pub use canvas::{Canvas, Pixel};
+pub use canvas::{Canvas, Color, Pixel};
 
-mod color;
-pub use color::Color;
+mod config;
+pub use config::CONFIG;
+
+mod cooldown;
+pub use cooldown::CooldownManager;
+
+mod state;
+pub use state::AppState;
