@@ -1,16 +1,14 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-    time::{Duration, Instant},
+use std::{collections::HashMap, fmt, sync::Arc};
+use tokio::{
+    sync::RwLock,
+    time::{self, Duration, Instant},
 };
-
-use tokio::time;
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 pub struct CooldownManager {
     cooldowns: Arc<RwLock<HashMap<Uuid, Instant>>>,
-    pub cooldown_duration: Duration,
+    cooldown_duration: Duration,
 }
 
 impl CooldownManager {
@@ -20,61 +18,60 @@ impl CooldownManager {
             cooldown_duration: Duration::from_secs(cooldown_seconds),
         };
 
-        let cleanup_cooldowns = manager.cooldowns.clone();
-        let cleanup_duration = manager.cooldown_duration;
+        let cooldowns_clone = manager.cooldowns.clone();
+        let cooldown_duration_clone = manager.cooldown_duration;
+
+        // spawn cleanup task
         tokio::spawn(async move {
             let mut interval = time::interval(Duration::from_secs(30));
             loop {
                 interval.tick().await;
                 let now = Instant::now();
-                if let Ok(mut cooldowns) = cleanup_cooldowns.write() {
-                    cooldowns.retain(|_, &mut last_access| {
-                        now.duration_since(last_access) < cleanup_duration * 2
-                    });
-                }
+
+                let mut cooldowns = cooldowns_clone.write().await;
+                cooldowns.retain(|_, &mut last_access| {
+                    now.duration_since(last_access) < cooldown_duration_clone * 2
+                });
             }
         });
 
         manager
     }
 
-    pub fn check_and_update_cooldown(&self, user_id: Uuid) -> Result<(), CooldownError> {
+    pub async fn check_and_update_cooldown(&self, user_id: Uuid) -> Result<(), CooldownError> {
         let now = Instant::now();
 
-        if let Ok(cooldowns) = self.cooldowns.read() {
-            if let Some(&last_access) = cooldowns.get(&user_id) {
-                let elapsed = now.duration_since(last_access);
-                if elapsed < self.cooldown_duration {
-                    return Err(CooldownError::OnCooldown(self.cooldown_duration - elapsed));
-                }
+        let cooldowns = self.cooldowns.read().await;
+
+        if let Some(&last_access) = cooldowns.get(&user_id) {
+            let elapsed = now.duration_since(last_access);
+            if elapsed < self.cooldown_duration {
+                return Err(CooldownError::OnCooldown(self.cooldown_duration - elapsed));
             }
         }
 
-        if let Ok(mut cooldowns) = self.cooldowns.write() {
-            cooldowns.insert(user_id, now);
-            Ok(())
-        } else {
-            Err(CooldownError::PosionedLock)
-        }
+        // drop read to acquire write
+        std::mem::drop(cooldowns);
+
+        let mut cooldowns = self.cooldowns.write().await;
+        cooldowns.insert(user_id, now);
+
+        Ok(())
     }
 }
 
 #[derive(Debug)]
 pub enum CooldownError {
     OnCooldown(Duration),
-    PosionedLock,
 }
 
 impl std::error::Error for CooldownError {}
 
-impl std::fmt::Display for CooldownError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for CooldownError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             CooldownError::OnCooldown(duration) => {
-                write!(f, "Action is on cooldown for {:.2?}", duration)
-            }
-            CooldownError::PosionedLock => {
-                write!(f, "The cooldown manager lock was poisoned")
+                write!(f, "action is on cooldown for {:.2?}", duration)
             }
         }
     }
